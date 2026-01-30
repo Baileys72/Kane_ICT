@@ -24,6 +24,7 @@ class ModbusApp:
         self.is_connected = False
         self.auto_running = False
         self.auto_thread = None
+        self.modbus_lock = threading.Lock()
 
         # GUI Variables
         self.ip_var = tk.StringVar(value="192.168.10.20")
@@ -185,7 +186,8 @@ class ModbusApp:
         self.client = ModbusTcpClient(ip, port=port)
         
         if self.client.connect():
-            self.is_connected = True
+            with self.modbus_lock:
+                self.is_connected = True
             self.status_var.set("Connected")
             self.lbl_modbus_status.config(text="Connected", fg="green")  # Update Status Label
             self.btn_connect.config(state="disabled")
@@ -203,9 +205,11 @@ class ModbusApp:
             # Wait a bit for thread to stop could be better, but simple stop signal is ok for now
 
         if self.client:
-            self.client.close()
+            with self.modbus_lock:
+                self.client.close()
         
-        self.is_connected = False
+        with self.modbus_lock:
+            self.is_connected = False
         self.status_var.set("Disconnected")
         self.lbl_modbus_status.config(text="Disconnected", fg="red") # Update Status Label
         self.btn_connect.config(state="normal")
@@ -224,13 +228,29 @@ class ModbusApp:
         self.btn_stop.config(state="normal")
         self.auto_thread = threading.Thread(target=self.run_auto_process, daemon=True)
         self.auto_thread.start()
+        
+        self.heartbeat_thread = threading.Thread(target=self.heartbeat_worker, daemon=True)
+        self.heartbeat_thread.start()
+
         self.log("Auto process started.")
 
     def stop_auto_process(self):
         self.auto_running = False
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
-        self.log("Stopping auto process...")
+        self.log("Stopping auto process and heartbeat...")
+
+    def heartbeat_worker(self):
+        val = 0
+        while self.auto_running:
+            if self.is_connected and self.client:
+                try:
+                    with self.modbus_lock:
+                        self.client.write_register(7000, val)
+                    val = 1 if val == 0 else 0
+                except Exception as e:
+                    self.log(f"Heartbeat error: {e}")
+            time.sleep(1)
 
     def run_auto_process(self):
         while self.auto_running:
@@ -263,7 +283,8 @@ class ModbusApp:
                 barcode_addrs = [2100, 2120, 2140, 2160]
                 
                 for i, addr in enumerate(barcode_addrs):
-                    rr = self.client.read_holding_registers(addr, count=20)
+                    with self.modbus_lock:
+                        rr = self.client.read_holding_registers(addr, count=20)
                     if rr.isError():
                         self.log(f"Error reading {addr}: {rr}")
                         continue
@@ -276,7 +297,8 @@ class ModbusApp:
 
                 # Step 2: Write 7001 = 0
                 self.log("Step 2: Writing 7001 = 0")
-                self.client.write_register(7001, 0)
+                with self.modbus_lock:
+                    self.client.write_register(7001, 0)
                 
                 # Step 3: Wait for 7001 == 3
                 self.log("Step 3: Waiting for 7001 = 3...")
@@ -288,7 +310,8 @@ class ModbusApp:
                 result_addrs = [2301, 2303, 2305, 2307]
                 results = {}
                 for i, addr in enumerate(result_addrs):
-                    rr = self.client.read_holding_registers(addr, count=1)
+                    with self.modbus_lock:
+                        rr = self.client.read_holding_registers(addr, count=1)
                     if not rr.isError():
                         val = rr.registers[0]
                         results[addr] = val
@@ -301,7 +324,8 @@ class ModbusApp:
                 
                 # Step 5: Write 7001 = 0
                 self.log("Step 5: Writing 7001 = 0")
-                self.client.write_register(7001, 0)
+                with self.modbus_lock:
+                    self.client.write_register(7001, 0)
 
                 # Step 6: Write SFIS results (2190-2193) = 1
                 self.log("Step 6: Writing SFIS results...")
@@ -309,7 +333,8 @@ class ModbusApp:
                 if self.sfis_status == "True":
                     for i, (barcode_addr, result_addr, sfis_addr) in enumerate(zip(barcode_addrs, result_addrs, sfis_addrs)):
                         sfis_result, ret = self.sfis_upload(barcode_addr, result_addr)
-                        self.client.write_register(sfis_addr, sfis_result)
+                        with self.modbus_lock:
+                            self.client.write_register(sfis_addr, sfis_result)
                         self.log(f"SFIS result at {sfis_addr}: {sfis_result}")
                         # Update GUI
                         sfis_result_labels[i].config(text="PASS" if sfis_result == 1 else "FAIL", fg="green" if sfis_result == 1 else "red")
@@ -326,7 +351,8 @@ class ModbusApp:
 
                 else:
                     for i, (barcode_addr, result_addr, sfis_addr) in enumerate(zip(barcode_addrs, result_addrs, sfis_addrs)):
-                        self.client.write_register(sfis_addr, 1)
+                        with self.modbus_lock:
+                            self.client.write_register(sfis_addr, 1)
                         self.log(f"SFIS result at {sfis_addr}: 1")
                         # Update GUI
                         sfis_result_labels[i].config(text="Bypass", fg="orange")
@@ -356,7 +382,8 @@ class ModbusApp:
         """Polls address until value matches target or auto_running is False"""
         while self.auto_running:
             try:
-                rr = self.client.read_holding_registers(address, count=1)
+                with self.modbus_lock:
+                    rr = self.client.read_holding_registers(address, count=1)
                 if rr.isError():
                     self.log(f"Read error at {address}")
                     time.sleep(1)
